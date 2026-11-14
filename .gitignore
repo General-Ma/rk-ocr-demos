@@ -222,3 +222,6 @@ __marimo__/
 # never commit its contents.
 /data/*
 !/data/.gitkeep
+
+# Frontend dependencies
+node_modules/
