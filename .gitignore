@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# Local datasets and generated files. Keep the directory itself in Git, but
+# never commit its contents.
+/data/*
+!/data/.gitkeep
