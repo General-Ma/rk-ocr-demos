@@ -1,6 +1,7 @@
-import React, {useState, useRef, useEffect} from 'react';
+import React, {useState, useRef, useEffect, useId} from 'react';
 import {createRoot} from 'react-dom/client';
 import './style.css';
+import {extractDocuments} from './api/extract.js';
 
 const labels = {match:'Match', mismatch:'Mismatch', missing_in_ocr:'Missing OCR', no_ground_truth:'No source value', unresolved:'Unresolved'};
 const fields = {performed:'Vital status performed', systolic:'Systolic blood pressure', diastolic:'Diastolic blood pressure', heart_rate:'Heart rate', temperature:'Temperature', weight:'Weight', significant:'Clinically significant'};
@@ -71,17 +72,37 @@ function Review({extraction, report = null}) {
   const [threshold, setThreshold] = useState(85), [filter, setFilter] = useState('all');
   const [selected, setSelected] = useState(rows[0] || null), [page, setPage] = useState(rows[0]?.page || 1), [zoom, setZoom] = useState(100);
   const sourceScroll = useRef(null);
-  function revealSource() {
-    const scroll = sourceScroll.current;
-    if (scroll && selected?.page === page && selected.bbox) scroll.scrollTop = selected.bbox[1] * (scroll.querySelector('img')?.clientHeight || 0) - scroll.clientHeight / 3;
-  }
-  useEffect(revealSource, [selected, page, zoom]);
-  function select(row) {setSelected(row); if(row.page) setPage(row.page);}
+  const selectionGroup = useId();
   const low = row => row.confidence != null && row.confidence * 100 < threshold;
   const count = status => rows.filter(r => r.status === status).length;
   const visible = rows.filter(r => filter === 'all' || (filter === 'review' ? (report ? r.status !== 'match' : !!r.status) || low(r) : filter === 'low' ? low(r) : r.status === filter));
+  // A filtered-out row must not leave an unrelated highlight on the document.
+  const active = visible.find(row => row.id === selected?.id) || null;
   const image = extraction.pages[page - 1];
-  const box = selected?.page === page ? selected.bbox : null;
+  const box = active?.page === page ? active.bbox : null;
+  function revealSource() {
+    const scroll = sourceScroll.current;
+    const img = scroll?.querySelector('img');
+    if (!scroll || !img || !box || !img.complete) return;
+    const imageRect = img.getBoundingClientRect();
+    const viewportRect = scroll.getBoundingClientRect();
+    scroll.scrollTo({
+      left: scroll.scrollLeft + imageRect.left - viewportRect.left + (box[0] + box[2]) / 2 * imageRect.width - scroll.clientWidth / 2,
+      top: scroll.scrollTop + imageRect.top - viewportRect.top + (box[1] + box[3]) / 2 * imageRect.height - scroll.clientHeight / 2,
+    });
+  }
+  useEffect(revealSource, [selected, page, zoom, filter, threshold]);
+  function select(row) {
+    if (row.id === selected?.id && row.page === page) revealSource();
+    setSelected(row);
+    if (row.page) setPage(row.page);
+  }
+  let locationCaption = 'Select a row to locate its information in the uploaded document.';
+  if (active) {
+    if (!active.page || !active.bbox) locationCaption = `${active.label}: no document location is available.`;
+    else if (active.page !== page) locationCaption = `${active.label} is on ${active.document_name}, page ${active.local_page}. Select its row to return.`;
+    else locationCaption = `${active.label} / ${active.document_name}, page ${active.local_page} / ${active.location_kind === 'detected' ? 'Detected text region' : 'Expected field or form region; inspect manually'}`;
+  }
   return <>
     {report && <><p className={report.aligned ? '' : 'warning'}>{report.alignment_note}</p>
       {report.documents?.length > 1 && <ul>{report.documents.map((doc, i) => <li key={i} className={doc.aligned ? '' : 'warning'}>{doc.name}: {doc.note}</li>)}</ul>}
@@ -89,16 +110,17 @@ function Review({extraction, report = null}) {
     </>}
     <p className="review-note">OCR suggestions are unverified. Confidence is an engine score, not a probability of correctness. Checkbox fields require manual review.</p>
     <div className="review">
-      <section className="source"><div className="toolbar"><h3>Uploaded document</h3><label>Page <select aria-label="Uploaded page" value={page} onChange={e => setPage(Number(e.target.value))}>{extraction.pages.map(p => <option key={p.page} value={p.page}>{p.document_name} / page {p.local_page}</option>)}</select></label><label>Zoom <select value={zoom} onChange={e => setZoom(Number(e.target.value))}>{[75,100,150,200].map(v => <option key={v}>{v}</option>)}</select>%</label></div>
-        <div className="page-scroll" ref={sourceScroll}><div className="page-image" style={{width:zoom + '%'}}><img onLoad={revealSource} src={image?.image} alt={`${image?.document_name}, page ${image?.local_page}`}/>{box && <div className="highlight" style={{left:box[0]*100+'%',top:box[1]*100+'%',width:(box[2]-box[0])*100+'%',height:(box[3]-box[1])*100+'%'}}/>}</div></div>
-        <p className="source-caption">{selected ? `${selected.label} / ${selected.location_kind === 'detected' ? 'Detected text region' : 'Expected field or form region; inspect manually'}` : 'Select a result to inspect the uploaded document.'}</p>
+      <section className="source"><div className="toolbar"><h3>Uploaded document</h3><label>Page <select aria-label="Uploaded page" value={page} onChange={e => setPage(Number(e.target.value))}>{extraction.pages.map(p => <option key={p.page} value={p.page}>{p.document_name} / page {p.local_page}</option>)}</select></label><label>Zoom <select aria-label="Document zoom" value={zoom} onChange={e => setZoom(Number(e.target.value))}>{[75,100,150,200].map(v => <option key={v}>{v}</option>)}</select>%</label></div>
+        <div className="page-scroll" ref={sourceScroll}><div className="page-image" style={{width:zoom + '%'}}><img onLoad={revealSource} src={image?.image} alt={`${image?.document_name}, page ${image?.local_page}`}/>{box && <div className={`highlight ${active.location_kind === 'detected' ? 'detected' : 'expected'}`} role="img" aria-label={`Location of ${active.label} in the uploaded document`} style={{left:box[0]*100+'%',top:box[1]*100+'%',width:(box[2]-box[0])*100+'%',height:(box[3]-box[1])*100+'%'}}/>}</div></div>
+        <p className="source-caption" aria-live="polite">{locationCaption}</p>
       </section>
       <section className="results"><div className="toolbar"><h3>{report ? 'Audit results' : 'Extracted values'}</h3><label>Show <select aria-label="Result filter" value={filter} onChange={e => setFilter(e.target.value)}><option value="all">All results</option><option value="review">Needs review</option><option value="low">Low confidence</option>{Object.entries(labels).filter(([key]) => report || ['missing_in_ocr','unresolved'].includes(key)).map(([key,value]) => <option key={key} value={key}>{value}</option>)}</select></label><label>Low confidence below <input aria-label="Low confidence threshold" type="number" min="0" max="100" value={threshold} onChange={e => setThreshold(Math.min(100, Math.max(0, Number(e.target.value))))}/>%</label></div>
-        <div className="table-scroll"><table><thead><tr><th>Document / reading</th><th>Field</th><th>Uploaded</th>{report && <th>Source</th>}<th>{report ? 'Result / confidence' : 'Review / confidence'}</th></tr></thead><tbody>{visible.map(row => <tr key={row.id} className={selected?.id === row.id ? 'selected' : ''}>
-          <td><button className="row-link" onClick={() => select(row)} aria-pressed={selected?.id === row.id}>#{row.reading}{report ? ` / ${row.scheduled_time || 'No slot'}` : ''}</button><small>{row.document_name || 'No uploaded document'}<br/>Actual {row.actual_time || (row.actual_time_text ? `${row.actual_time_text} (unverified)` : 'unreadable')}<br/>Page {row.local_page || '—'}</small></td>
+        <div className="table-scroll"><table><thead><tr><th className="select-column">View</th><th>Document / reading</th><th>Field</th><th>Uploaded</th>{report && <th>Source</th>}<th>{report ? 'Result / confidence' : 'Review / confidence'}</th></tr></thead><tbody>{visible.map(row => <tr key={row.id} className={`result-row ${active?.id === row.id ? 'selected' : ''}`} onClick={() => select(row)}>
+          <td className="select-column"><input type="radio" name={selectionGroup} checked={active?.id === row.id} onChange={() => select(row)} aria-label={`View reading ${row.reading}, ${row.label}, ${row.document_name || 'no document'}, page ${row.local_page || 'unavailable'}`}/></td>
+          <td><span className="reading-label">#{row.reading}{report ? ` / ${row.scheduled_time || 'No slot'}` : ''}</span><small>{row.document_name || 'No uploaded document'}<br/>Actual {row.actual_time || (row.actual_time_text ? `${row.actual_time_text} (unverified)` : 'unreadable')}<br/>Page {row.local_page || '—'}</small></td>
           <td>{row.label}</td><td><span className="value">{row.ocr_value || row.ocr_text || '—'}</span>{row.ocr_value && row.ocr_value !== row.ocr_text && <small>Original: {row.ocr_text}</small>}</td>{report && <td><span className="value">{row.csv_text || '(blank)'}</span></td>}
           <td><span className={'status ' + (row.status || '')}>{row.status ? labels[row.status] : 'Not audited'}</span><small className={low(row) ? 'warning' : ''}>{row.confidence == null ? 'No confidence score' : `${Math.round(row.confidence * 100)}%${low(row) ? ' / Low confidence' : ''}`}</small></td>
-        </tr>)}</tbody></table>{!visible.length && <p className="no-results">No results in this filter.</p>}</div><p className="source-caption">{visible.length} of {rows.length} values / select a reading to view the uploaded document</p>
+        </tr>)}</tbody></table>{!visible.length && <p className="no-results">No results in this filter.</p>}</div><p className="source-caption">{visible.length} of {rows.length} values / select any row to highlight its location in the uploaded document</p>
       </section>
     </div>
   </>;
@@ -112,6 +134,31 @@ async function post(path, data) {
   return body;
 }
 
+const processingPhases = ['Uploading', 'Checking documents', 'Loading OCR', 'Reading pages', 'Preparing results'];
+function ProcessingStatus({progress, analyzing = false}) {
+  const phase = progress?.phase || 'uploading';
+  const phaseIndex = {uploading:0, validating:1, loading:2, rendering:3, reading:3, preparing:4}[phase] ?? 0;
+  const paged = !analyzing && ['rendering', 'reading'].includes(phase) && progress.total_pages > 0;
+  const titles = {uploading:'Uploading documents…', validating:'Checking documents…', loading:'Loading OCR…',
+    rendering:`Rendering page ${progress?.page} of ${progress?.total_pages}…`,
+    reading:`Reading page ${progress?.page} of ${progress?.total_pages}…`, preparing:'Preparing extracted information…'};
+  const title = analyzing ? 'Analyzing…' : titles[phase];
+  const detail = analyzing ? 'Checking uploaded readings against the source for mismatches and missing information.'
+    : paged ? `${progress.completed_pages} of ${progress.total_pages} pages processed`
+    : phase === 'loading' ? 'Initializing the local recognition models.'
+    : phase === 'preparing' ? 'Assembling extracted values and document locations.'
+    : phase === 'validating' ? 'Checking PDF contents and page limits.' : 'Sending your documents for processing.';
+  return <section className="processing-status" aria-label={analyzing ? 'Audit analysis' : 'Document processing'}>
+    <div className="processing-heading" role="status" aria-live="polite"><span className="loading-spinner" aria-hidden="true"/><div><strong>{title}</strong><p>{detail}</p></div></div>
+    <div className={`loading-track ${paged ? '' : 'indeterminate'}`} role="progressbar"
+      aria-label={paged ? 'Pages processed' : title} aria-valuemin={0} aria-valuemax={paged ? progress.total_pages : undefined}
+      aria-valuenow={paged ? progress.completed_pages : undefined} aria-valuetext={detail}>
+      <span style={paged ? {width:`${100 * progress.completed_pages / progress.total_pages}%`} : undefined}/>
+    </div>
+    {!analyzing && <ol className="processing-phases" aria-label="Processing phases">{processingPhases.map((label, i) => <li key={label} aria-current={i === phaseIndex ? 'step' : undefined} className={i < phaseIndex ? 'complete' : ''}>{i < phaseIndex && <span aria-label="Complete">✓ </span>}{label}</li>)}</ol>}
+  </section>;
+}
+
 function App() {
   const [panel, setPanel] = useState('source');
   const [source, setSource] = useState('csv'), [csv, setCsv] = useState(null), [pdfs, setPdfs] = useState([]);
@@ -119,9 +166,10 @@ function App() {
   const [extraction, setExtraction] = useState(null), [report, setReport] = useState(null);
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [showExtraction, setShowExtraction] = useState(true);
   const [runKey, setRunKey] = useState(0);
+  const [progress, setProgress] = useState(null);
   const heading = useRef(null);
   useEffect(() => {heading.current?.focus();}, [panel]);
-  function clear() {setPanel('source'); setConfirmed(null); setSource('csv'); setCsv(null); setPdfs([]); setExtraction(null); setReport(null); setError(''); setShowExtraction(true); setRunKey(k => k + 1);}
+  function clear() {setPanel('source'); setConfirmed(null); setSource('csv'); setCsv(null); setPdfs([]); setExtraction(null); setReport(null); setError(''); setShowExtraction(true); setRunKey(k => k + 1); setProgress(null);}
   function changeSource(value) {setSource(value); setConfirmed(null); setReport(null); setError(''); setShowExtraction(true);}
   function changeCsv(value) {setCsv(value); setConfirmed(null); setReport(null); setError(''); setShowExtraction(true);}
   function changePdfs(value) {setPdfs(value); setExtraction(null); setReport(null); setError(''); setShowExtraction(true);}
@@ -131,9 +179,9 @@ function App() {
     try {setConfirmed(await post('/api/source', data)); setPanel('documents');} catch (e) {setError(e.message);} finally {setBusy('');}
   }
   async function processDocuments() {
-    setBusy('extract'); setError(''); setExtraction(null); setReport(null); setShowExtraction(true);
+    setProgress({phase:'uploading'}); setBusy('extract'); setError(''); setExtraction(null); setReport(null); setShowExtraction(true);
     const data = new FormData(); pdfs.forEach(pdf => data.append('pdfs', pdf));
-    try {setExtraction(await post('/api/extract', data));} catch (e) {setError(e.message);} finally {setBusy('');}
+    try {setExtraction(await extractDocuments(data, setProgress));} catch (e) {setError(e.message);} finally {setBusy(''); setProgress(null);}
   }
   async function audit() {
     setBusy('audit'); setError(''); setReport(null);
@@ -154,9 +202,9 @@ function App() {
       <div className="confirmed-source"><strong>Source confirmed</strong><span>{csv.name}</span><span>{confirmed.reading_count} readings, {confirmed.field_count} fields</span></div>
       <p>Add one or more scanned PDFs. Up to 10 files, 20 MB and 12 pages in total. PDFs are combined into one chart in the order listed.</p>
       <FilePicker key={runKey} kind="pdf" files={pdfs} onChange={changePdfs} disabled={!!busy} multiple/>
-      <div className="run-bar document-actions"><button className="primary" disabled={!pdfs.length || !!busy} onClick={processDocuments}>{busy === 'extract' ? 'Processing…' : 'Process'}</button><button className="primary" disabled={!extraction || !confirmed || !!busy} onClick={audit}>{busy === 'audit' ? 'Comparing…' : 'Compare / Audit'}</button><p>{extraction ? 'Compare uploaded values with the confirmed source.' : 'Process the documents to review their information and enable auditing.'}</p></div>
-      {busy === 'extract' && <p className="notice" role="status">Processing uploaded documents. This may take several minutes.</p>}
-      {busy === 'audit' && <p role="status">Comparing uploaded information with the source…</p>}
+      <div className="run-bar document-actions"><button className="primary" disabled={!pdfs.length || !!busy} onClick={processDocuments}>{busy === 'extract' ? 'Processing…' : 'Process'}</button><button className="primary" disabled={!extraction || !confirmed || !!busy} onClick={audit}>{busy === 'audit' ? 'Analyzing…' : 'Compare / Audit'}</button><p>{extraction ? 'Compare uploaded values with the confirmed source.' : 'Process the documents to review their information and enable auditing.'}</p></div>
+      {busy === 'extract' && <ProcessingStatus progress={progress}/>}
+      {busy === 'audit' && <ProcessingStatus analyzing/>}
       {extraction && <div className="extraction-section"><div className="section-heading"><h3>Uploaded information</h3><p>{extraction.documents.length} documents, {extraction.pages.length} pages, {extraction.documents.reduce((sum, doc) => sum + doc.readings.length, 0)} readings</p><button aria-expanded={showExtraction} onClick={() => setShowExtraction(v => !v)}>{showExtraction ? 'Hide uploaded information' : 'Show uploaded information'}</button></div>
         {extraction.documents.filter(doc => !doc.readings.length).map((doc, i) => <p key={i} className="warning">{doc.name}: no supported readings detected. Inspect this document manually.</p>)}
         {showExtraction && <Review extraction={extraction}/>}

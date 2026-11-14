@@ -11,7 +11,17 @@ wizard advances. Invalid uploads stay on this panel with an error.
 **Documents and audit:** add PDFs and click **Process** to inspect uploaded
 information, confidence, and highlighted document regions. Then click
 **Compare / Audit** to compare it with the confirmed source. Results use separate
-**Uploaded** and **Source** columns. Auditing never reruns OCR. Use **Back to
+**Uploaded** and **Source** columns. Select any result row (or use its radio
+control with the keyboard) to open the matching PDF page and center the field's
+bounding box, including when zoomed in. Solid boxes mark detected text; dashed
+boxes mark expected areas that need manual inspection. Filtering out the selected
+row removes its highlight. Auditing never reruns OCR.
+
+During processing, the UI shows live phases: uploading, checking documents,
+loading OCR, reading pages, and preparing results. The page bar measures completed
+pages; phases without a measurable total use an indeterminate animation. Audit
+requests display **Analyzing…** until the response arrives. Loading indicators
+respect reduced-motion settings and clear on success or errors. Use **Back to
 source** to change the reference data; changing it invalidates the audit report
 while retaining the document extraction.
 
@@ -137,7 +147,10 @@ API: `GET /api/health` reports service readiness (models initialize on demand).
 - `POST /api/source`: multipart `source` file. Validates the reference CSV and
   returns reading/field counts, without saving the uploaded data.
 - `POST /api/extract`: multipart `pdfs` file fields (repeat for each PDF). Returns
-  extracted documents and source page images, without comparison results.
+  extracted documents and source page images, without comparison results. With
+  `Accept: application/x-ndjson`, streams progress events followed by a final
+  `result` event, or an `error` event if processing fails. Blank lines keep the
+  connection live. The wizard uses this stream; no jobs or results are persisted.
 - `POST /api/compare`: multipart `csv` file and `extraction` JSON string containing
   `documents` (the extraction response's document array in upload order). Returns the audit report; the server saves no extraction state.
 - `POST /api/ocr`: retained for older clients; accepts `pdf` and `csv` file fields

@@ -1,8 +1,10 @@
 import asyncio
 import multiprocessing
+import json
+from contextlib import aclosing
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import UploadFile
 from .services.pipeline import worker, extraction_worker, audit_documents
@@ -78,6 +80,14 @@ async def ocr(request: Request):
 
 
 async def run_worker(request, target, args):
+    async with aclosing(worker_events(request, target, args)) as events:
+        async for status, payload in events:
+            if status == 'ok':
+                result = payload
+    return result
+
+
+async def worker_events(request, target, args, monitor_disconnect=True):
     context = multiprocessing.get_context('spawn')
     parent, child = context.Pipe(duplex=False)
     process = context.Process(target=target,args=(child,*args),daemon=True)
@@ -85,53 +95,87 @@ async def run_worker(request, target, args):
         process.start()
         child.close()
         deadline = asyncio.get_running_loop().time()+TIMEOUT_SECONDS
-        while not parent.poll():
-            if not process.is_alive():
-                raise HTTPException(500,'OCR worker stopped unexpectedly. Try a smaller scan.')
+        heartbeat = asyncio.get_running_loop().time()
+        while True:
             if asyncio.get_running_loop().time()>deadline:
                 raise HTTPException(504,'OCR exceeded the 10-minute limit. Try fewer pages.')
-            if await request.is_disconnected():
+            if monitor_disconnect and await request.is_disconnected():
                 raise HTTPException(499,'Client disconnected.')
-            await asyncio.sleep(.1)
-        try:
-            status, payload = await asyncio.to_thread(parent.recv)
-        except EOFError:
-            raise HTTPException(500,'OCR worker stopped before returning a report.') from None
-        if status != 'ok':
-            raise HTTPException(422 if status=='validation' else 503,payload)
-        return payload
+            if parent.poll():
+                try:
+                    status, payload = await asyncio.to_thread(parent.recv)
+                except EOFError:
+                    raise HTTPException(500,'OCR worker stopped before returning a report.') from None
+                if status not in ('ok', 'progress'):
+                    raise HTTPException(422 if status=='validation' else 503,payload)
+                yield status, payload
+                if status == 'ok':
+                    return
+            elif not process.is_alive():
+                raise HTTPException(500,'OCR worker stopped unexpectedly. Try a smaller scan.')
+            else:
+                # Keep the response live so a disconnected client cancels work,
+                # even during model initialization or a long OCR call.
+                if asyncio.get_running_loop().time() - heartbeat >= 1:
+                    yield 'heartbeat', {}
+                    heartbeat = asyncio.get_running_loop().time()
+                await asyncio.sleep(.1)
     finally:
-        if process.is_alive():
-            process.terminate()
-        if process.pid is not None:
-            await asyncio.to_thread(process.join, 5)
+        try:
             if process.is_alive():
-                process.kill()
-                await asyncio.to_thread(process.join)
-        parent.close()
-        child.close()
+                process.terminate()
+            if process.pid is not None:
+                await asyncio.shield(asyncio.to_thread(process.join, 5))
+                if process.is_alive():
+                    process.kill()
+                    await asyncio.shield(asyncio.to_thread(process.join))
+        finally:
+            parent.close()
+            child.close()
 
 @app.post('/api/extract')
 async def extract(request: Request):
     if busy.locked():
         raise HTTPException(409, 'Another extraction is running. Try again when it finishes.')
+    async with request.form(max_files=10, max_fields=0) as form:
+        uploads = form.getlist('pdfs')
+        if not uploads or len(uploads) != len(form.multi_items()):
+            raise HTTPException(422, 'Upload 1–10 PDFs using the pdfs field.')
+        content, total = [], 0
+        for upload in uploads:
+            if not isinstance(upload, UploadFile) or not (upload.filename or '').lower().endswith('.pdf'):
+                raise HTTPException(422, 'Each document must be a PDF.')
+            blob = await upload.read(20 * 1024 * 1024 + 1)
+            total += len(blob)
+            if not blob or total > 20 * 1024 * 1024:
+                raise HTTPException(413, 'PDFs must be nonempty and total at most 20 MB.')
+            if b'%PDF-' not in blob[:1024]:
+                raise HTTPException(422, 'An uploaded document is not a PDF.')
+            content.append((upload.filename, blob))
+    if 'application/x-ndjson' in request.headers.get('accept', ''):
+        return StreamingResponse(extraction_stream(request, content), media_type='application/x-ndjson',
+                                 headers={'X-Accel-Buffering':'no'})
+    if busy.locked():
+        raise HTTPException(409, 'Another extraction is running. Try again when it finishes.')
     async with busy:
-        async with request.form(max_files=10, max_fields=0) as form:
-            uploads = form.getlist('pdfs')
-            if not uploads or len(uploads) != len(form.multi_items()):
-                raise HTTPException(422, 'Upload 1–10 PDFs using the pdfs field.')
-            content, total = [], 0
-            for upload in uploads:
-                if not isinstance(upload, UploadFile) or not (upload.filename or '').lower().endswith('.pdf'):
-                    raise HTTPException(422, 'Each document must be a PDF.')
-                blob = await upload.read(20 * 1024 * 1024 + 1)
-                total += len(blob)
-                if not blob or total > 20 * 1024 * 1024:
-                    raise HTTPException(413, 'PDFs must be nonempty and total at most 20 MB.')
-                if b'%PDF-' not in blob[:1024]:
-                    raise HTTPException(422, 'An uploaded document is not a PDF.')
-                content.append((upload.filename, blob))
         return await run_worker(request, extraction_worker, [content])
+
+async def extraction_stream(request, content):
+    try:
+        if busy.locked():
+            raise HTTPException(409, 'Another extraction is running. Try again when it finishes.')
+        async with busy:
+            async with aclosing(worker_events(request, extraction_worker, [content], monitor_disconnect=False)) as events:
+                async for status, payload in events:
+                    if status == 'heartbeat':
+                        yield '\n'
+                    else:
+                        event = {'type':'progress', **payload} if status == 'progress' else {'type':'result', 'data':payload}
+                        yield json.dumps(event) + '\n'
+    except HTTPException as exc:
+        yield json.dumps({'type':'error', 'detail':exc.detail}) + '\n'
+    except Exception:
+        yield json.dumps({'type':'error', 'detail':'Processing was interrupted. Please try again.'}) + '\n'
 
 
 @app.post('/api/source')
