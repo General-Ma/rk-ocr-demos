@@ -5,18 +5,18 @@ def alignment(readings, truth):
     # Do not infer a slot from a clinical value. Require every timestamp and a
     # consistent, small offset before comparing forms in document order.
     if len(readings) != len(truth['times']):
-        return False, 'Form count differs from CSV reading count. Alignment needs review.'
+        return False, 'Form count differs from Source reading count. Alignment needs review.'
     slots = [r.get('slot_offset') for r in readings]
     expected = [t - truth['minutes'][0] for t in truth['minutes']]
     if all(s is not None for s in slots):
         if slots != expected or len(set(slots)) != len(slots):
-            return False, 'Printed form intervals do not match the CSV sequence. Alignment is unresolved.'
+            return False, 'Printed form intervals do not match the Source sequence. Alignment is unresolved.'
         # Require independent time evidence for the baseline; interval headings
         # then identify slots even when an actual time is missing or corrected.
         anchors = sum(r.get('minutes') is not None and abs(r['minutes']-t) <= 10
                       for r, t in zip(readings, truth['minutes']))
         if anchors < min(2, len(readings)):
-            return False, 'Printed intervals were read, but actual times do not establish the CSV baseline.'
+            return False, 'Printed intervals were read, but actual times do not establish the Source baseline.'
         return True, f'Sequence aligned by {len(readings)} printed form intervals and {anchors} supporting actual times. No global time offset applied; unreadable actual times remain unverified.'
     actual = [r.get('minutes') for r in readings]
     if any(t is None for t in actual):
@@ -49,6 +49,7 @@ def compare(readings, truth):
             else:
                 status = 'match' if left == right else 'mismatch'
             rows.append({'id': len(rows), 'reading': i + 1, 'scheduled_time': truth['times'][i] if i < len(truth['times']) else None,
+                         'document_name': reading.get('document_name'), 'local_page': reading.get('local_page'),
                          'actual_time': reading.get('time'), 'actual_time_text': reading.get('time_text', ''), 'field': field['id'], 'label': field['label'],
                          'ocr_text': raw, 'ocr_value': observed, 'csv_text': expected, 'status': status,
                          'confidence': item.get('confidence'), 'page': reading.get('page'),

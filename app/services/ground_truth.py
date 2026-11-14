@@ -23,7 +23,7 @@ def field_id(label):
         return 'weight'
     if 'significant' in text:
         return 'significant'
-    raise ValueError(f'Unsupported CSV field: {label[:80]}')
+    raise ValueError(f'Unsupported Source field: {label[:80]}')
 
 
 def minutes(text):
@@ -33,29 +33,29 @@ def minutes(text):
             return t.hour * 60 + t.minute
         except ValueError:
             pass
-    raise ValueError('CSV reading times must use HH:MM or H:MM AM/PM.')
+    raise ValueError('Source reading times must use HH:MM or H:MM AM/PM.')
 
 
 def parse_csv(content):
     try:
         matrix = list(csv.reader(io.StringIO(content.decode('utf-8-sig')), strict=True))
     except (UnicodeDecodeError, csv.Error) as exc:
-        raise ValueError('CSV must be a valid UTF-8 comma-separated file.') from exc
+        raise ValueError('Source must be a valid UTF-8 comma-separated file.') from exc
     matrix = [row for row in matrix if any(cell.strip() for cell in row)]
     if len(matrix) < 2 or not 2 <= len(matrix[0]) <= 65:
-        raise ValueError('CSV needs a header with 1–64 reading times and field rows.')
+        raise ValueError('Source needs a header with 1–64 reading times and field rows.')
     times = [cell.strip() for cell in matrix[0][1:]]
     time_minutes = [minutes(t) for t in times]
     if any(b <= a for a, b in zip(time_minutes, time_minutes[1:])):
-        raise ValueError('CSV reading times must be unique and in increasing order within one day.')
+        raise ValueError('Source reading times must be unique and in increasing order within one day.')
     fields = []
     seen = set()
     for row in matrix[1:]:
         if len(row) != len(matrix[0]):
-            raise ValueError('Every CSV row must have the same number of cells as the header; use empty cells for missing values.')
+            raise ValueError('Every Source row must have the same number of cells as the header; use empty cells for missing values.')
         key = field_id(row[0])
         if key in seen:
-            raise ValueError('CSV contains a duplicate field.')
+            raise ValueError('Source contains a duplicate field.')
         seen.add(key)
         fields.append({'id': key, 'label': row[0], 'values': row[1:]})
     return {'times': times, 'minutes': time_minutes, 'fields': fields}

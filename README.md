@@ -1,8 +1,26 @@
 # OCR chart review demo
 
 A local React + FastAPI workbench for comparing scanned vital-sign forms with a
-CSV of scheduled readings. Drop both files into the page, run comparison, then
-select a reading to inspect the highlighted region on its source page.
+CSV of scheduled readings, using a two-panel wizard.
+
+**Configure source data:** choose Upload file, Database, or API. File upload
+supports CSV; Database and API offer configuration previews only. Select a source
+file and click **Confirm source**. The server validates its contents before the
+wizard advances. Invalid uploads stay on this panel with an error.
+
+**Documents and audit:** add PDFs and click **Process** to inspect uploaded
+information, confidence, and highlighted document regions. Then click
+**Compare / Audit** to compare it with the confirmed source. Results use separate
+**Uploaded** and **Source** columns. Auditing never reruns OCR. Use **Back to
+source** to change the reference data; changing it invalidates the audit report
+while retaining the document extraction.
+
+Multiple PDFs are combined into one chart in upload order and audited against the
+single CSV schedule. Every result retains its document name and local page
+number. Ambiguous alignment remains unresolved.
+
+Changing the main source clears the report and retains extraction.
+Adding/removing PDFs clears both extraction and report. Clear run resets everything.
 
 ## Run locally
 
@@ -36,8 +54,8 @@ No CORS configuration is needed. Run one backend worker for this small demo.
 
 ## What the demo does
 
-- Accepts one PDF (20 MB maximum, 1–12 pages) and one UTF-8 CSV (1 MB maximum).
-  Requests are bounded to 22 MB, including multipart overhead.
+- Accepts 1–10 PDFs (20 MB and 1–12 pages in total) and one UTF-8 CSV
+  (1 MB maximum). Requests are bounded to 22 MB, including multipart overhead.
 - Renders scans to at most 2,000 pixels on the longest side, then runs local
   RapidOCR/ONNX OCR. It detects printed labels and reads their adjacent regions.
 - Parses CSV reading times across columns and fields down rows. Quoted cells,
@@ -88,8 +106,9 @@ Multipart uploads may briefly spool to system temporary files; the parser closes
 and deletes them on completion or errors. OCR runs in a separate process using
 in-memory PDF bytes and page images. The worker is terminated after the response,
 on client disconnect, or after ten minutes. Only one run is accepted at a time.
-Responses use `Cache-Control: no-store`. The browser holds the report and source
-images until Clear run or refresh. Model files are software assets in the OCR
+Responses use `Cache-Control: no-store`. The browser holds the extraction, report,
+and source images until Clear run or refresh. The audit request sends only the CSV
+and extracted readings back to the server; it does not resend PDF page images. Model files are software assets in the OCR
 package/cache and remain installed. ONNX telemetry is disabled.
 
 Private samples and local development artifacts belong in ignored `data/`.
@@ -107,13 +126,24 @@ node .agents/skills/avoid-ai-design/scripts/detect.mjs frontend/src
 ```
 
 Tests cover CSV validation/normalization, comparison states, interval alignment,
-ambiguous timestamps, checkbox uncertainty, upload limits, and malformed PDFs.
-A real-sample Chrome check also exercised upload, source highlighting, mismatch
-filtering, mobile layout, and clearing the run. No browser automation dependency
+ambiguous timestamps, checkbox uncertainty, upload limits, malformed PDFs, separate
+extraction/auditing, and combined multi-document audits.
+A real-sample Chrome check also exercised the wizard flow with the sample
+split into two PDFs, configuration previews, source highlighting across PDFs,
+mismatch filtering, mobile layout, and invalidation of stale results. No browser automation dependency
 is needed to run the demo.
 
 API: `GET /api/health` reports service readiness (models initialize on demand).
-`POST /api/ocr` accepts multipart `pdf` and `csv` file fields. Errors return a
-`detail` message. A busy server returns 409; a processing timeout returns 504.
+- `POST /api/source`: multipart `source` file. Validates the reference CSV and
+  returns reading/field counts, without saving the uploaded data.
+- `POST /api/extract`: multipart `pdfs` file fields (repeat for each PDF). Returns
+  extracted documents and source page images, without comparison results.
+- `POST /api/compare`: multipart `csv` file and `extraction` JSON string containing
+  `documents` (the extraction response's document array in upload order). Returns the audit report; the server saves no extraction state.
+- `POST /api/ocr`: retained for older clients; accepts `pdf` and `csv` file fields
+  and performs the original single-document combined operation.
+
+Errors return a `detail` message. A busy OCR server returns 409; a processing
+timeout returns 504.
 
 See [the original design](docs/system-design.md) for the handoff specification.
